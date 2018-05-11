@@ -33,6 +33,7 @@ you can also use `-f` to force the MS ADPCM sound to be converted to PCM 16bits.
 An example could be:
 
 `./rewxb Content/XACT/Wave\ Bank.wxb new.wxb 11025 -f`
+
 Another optionnal parameter is `-p`, in that case no verbose message is shown, only a percentage number (to be used with a zenity progress bar).
 
 Note that input and output wxb file *MUST* be different.
