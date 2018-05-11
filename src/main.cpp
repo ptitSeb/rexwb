@@ -100,7 +100,11 @@ int main(int argc, const char **argv) {
     const char* infile = argv[1];
     const char* outfile = argv[2];
 
-    printf("Will convert %s to %s @%d Hz\n", infile, outfile, rate);
+    if(verbose)
+        printf("Will convert %s to %s @%d Hz\n", infile, outfile, rate);
+    
+    if(percentage)
+        setbuf(stdout, NULL);
 
     FILE *fin, *fout;
     fin = fopen(infile, "rb");
