@@ -58,6 +58,8 @@ int main(int argc, const char **argv) {
     int percentage = 0;
     int force = 0;
     int mono = 0;
+    int bits8 = 0;
+    int silent = 0;
 
     if(argc>3) {
         int t;
@@ -75,6 +77,10 @@ int main(int argc, const char **argv) {
                 {force=1;}
             else if(!strcmp(argv[i], "-m"))
                 {mono=1;}
+            else if(!strcmp(argv[i], "-8"))
+                {bits8=1; force=1;}
+            else if(!strcmp(argv[i], "-s") && argc>=i+1)
+                {++i; sscanf(argv[i],"%d", &silent);}
             else rate = 0;
         }
     }
@@ -85,6 +91,8 @@ int main(int argc, const char **argv) {
             "Warning, OUTFILE.xwb is overwiten (and must be different then INFILE.xwb)\n"
             "Use -f to force MS ADPCM to simple PCM\n"
             "Use -m to force mono on all multi-channels ADPCM or PCM sounds\n"
+            "Use -8 to force PCM sounds and 8 bits (don't use)\n"
+            "Use -s XX to replace sounds longer then XX sec to 1 sec silence"
             "Use -p to display percentage (no verbose output, to be used with a zenity progress bar)\n"
             , argv[0]);
         return 1;
@@ -101,7 +109,11 @@ int main(int argc, const char **argv) {
     const char* outfile = argv[2];
 
     if(verbose)
-        printf("Will convert %s to %s @%d Hz\n", infile, outfile, rate);
+        printf("Will convert %s to %s @%d Hz%s%s%s\n", infile, outfile, rate, 
+            force?" force PCM":"",
+            mono?" force Mono":"",
+            bits8?" force 8 bits":"",
+            silent? " replace long sound with 3sec silence":"");
     
     if(percentage)
         setbuf(stdout, NULL);
@@ -518,16 +530,16 @@ int main(int argc, const char **argv) {
                 printf( "\t\"%s\"\n", name );
         }
 
-
+        float seconds;
         if ( bank.dwFlags & WAVEBANK_FLAGS_COMPACT )
         {
-            float seconds = float( DurationCompact ) / float( miniFmt->nSamplesPerSec );
+            seconds = float( DurationCompact ) / float( miniFmt->nSamplesPerSec );
             if(verbose)
                 printf( "\tEstDuration %u samples (%f seconds)\n", DurationCompact, seconds );
         }
         else
         {
-            float seconds = float( Duration ) / float( miniFmt->nSamplesPerSec );
+            seconds = float( Duration ) / float( miniFmt->nSamplesPerSec );
             if(verbose)
                 printf( "\tDuration %u samples (%f seconds), EstDuration %u\n", Duration, seconds, DurationCompact );
         }
@@ -624,150 +636,158 @@ int main(int argc, const char **argv) {
         // convert!
         {
             // load the data in a buffer
-            void* buffin = malloc(dwLength + (convert?(adpcm_in?sizeof(WAVHEADER_ADPCM):sizeof(WAVHEADER_SIMPLE)):0));
-            fseek(fin, waveOffset + dwOffset, SEEK_SET);
-            char* p = (char*)buffin;
-            if(convert) {
-                if(adpcm_in) {
-                    // Write MS ADPCM WAV Header
-                    WAVHEADER_ADPCM head;
-                    memcpy(&head.sign, "RIFF", 4);
-                    head.filesize = dwLength + sizeof(WAVHEADER_ADPCM) - 8;
-                    memcpy(&head.format, "WAVE", 4);
-                    // fmt
-                    memcpy(&head.formatid, "fmt ", 4);
-                    head.blocksize = 0x10 + 32 + 2;
-                    head.audioformat = 2;
-                    head.channels = miniFmt->nChannels;
-                    head.rate = miniFmt->nSamplesPerSec;
-                    head.bytepersec = miniFmt->AvgBytesPerSec();
-                    head.byteperblock = miniFmt->BlockAlign();
-                    head.bitspersample = miniFmt->BitsPerSample();
-                    // extra
-                    head.extrassz = 32;
-                    head.newsz =  (((head.byteperblock - (7 * head.channels)) * 8) / (head.bitspersample * head.channels)) + 2;
-                    head.ncoeff = 7;
-                    head.coef[0] = 0x00000100;
-                    head.coef[1] = 0xFF000200;
-                    head.coef[2] = 0x00000000;
-                    head.coef[3] = 0x004000C0;
-                    head.coef[4] = 0x000000F0;
-                    head.coef[5] = 0xFF3001CC;
-                    head.coef[6] = 0xFF180188;
-                    memcpy(&head.factid, "fact", 4);
-                    head.factsz = 4;
-                    if(head.byteperblock && head.channels) {
-                        head.factdata = ((head.byteperblock - (7 * head.channels)) * 8) / head.bitspersample;
-                        head.factdata = (dwLength / head.byteperblock ) * head.factdata;
-                        head.factdata /= head.channels;
-                    } else
-                        head.factdata = 0;
-                    // data
-                    memcpy(&head.blockid, "data", 4);
-                    head.datasize = dwLength;
-                    memcpy(p, &head, sizeof(head));
-                    p+=sizeof(head);  // WAV Header
-                } else {
-                    // Write simple PCM WAV Header
-                    WAVHEADER_SIMPLE head;
-                    memcpy(&head.sign, "RIFF", 4);
-                    head.filesize = dwLength + 44 - 8;
-                    memcpy(&head.format, "WAVE", 4);
-                    // fmt
-                    memcpy(&head.formatid, "fmt ", 4);
-                    head.blocksize = 0x10;
-                    head.audioformat = 1;
-                    head.channels = miniFmt->nChannels;
-                    head.rate = miniFmt->nSamplesPerSec;
-                    head.bytepersec = miniFmt->AvgBytesPerSec();
-                    head.byteperblock = miniFmt->BlockAlign();
-                    head.bitspersample = miniFmt->BitsPerSample();
-                    // data
-                    memcpy(&head.blockid, "data", 4);
-                    head.datasize = dwLength;
-                    memcpy(p, &head, sizeof(head));
-                    p+=sizeof(head);  // WAV Header
+            void* buffin = NULL;
+            char* p;
+            int silence = (convert && silent && seconds>silent);
+            if(!silence) {
+                // read input wav
+                buffin = malloc(dwLength + (convert?(adpcm_in?sizeof(WAVHEADER_ADPCM):sizeof(WAVHEADER_SIMPLE)):0));
+                fseek(fin, waveOffset + dwOffset, SEEK_SET);
+                p = (char*)buffin;
+                if(convert) {
+                    if(adpcm_in) {
+                        // Write MS ADPCM WAV Header
+                        WAVHEADER_ADPCM head;
+                        memcpy(&head.sign, "RIFF", 4);
+                        head.filesize = dwLength + sizeof(WAVHEADER_ADPCM) - 8;
+                        memcpy(&head.format, "WAVE", 4);
+                        // fmt
+                        memcpy(&head.formatid, "fmt ", 4);
+                        head.blocksize = 0x10 + 32 + 2;
+                        head.audioformat = 2;
+                        head.channels = miniFmt->nChannels;
+                        head.rate = miniFmt->nSamplesPerSec;
+                        head.bytepersec = miniFmt->AvgBytesPerSec();
+                        head.byteperblock = miniFmt->BlockAlign();
+                        head.bitspersample = miniFmt->BitsPerSample();
+                        // extra
+                        head.extrassz = 32;
+                        head.newsz =  (((head.byteperblock - (7 * head.channels)) * 8) / (head.bitspersample * head.channels)) + 2;
+                        head.ncoeff = 7;
+                        head.coef[0] = 0x00000100;
+                        head.coef[1] = 0xFF000200;
+                        head.coef[2] = 0x00000000;
+                        head.coef[3] = 0x004000C0;
+                        head.coef[4] = 0x000000F0;
+                        head.coef[5] = 0xFF3001CC;
+                        head.coef[6] = 0xFF180188;
+                        memcpy(&head.factid, "fact", 4);
+                        head.factsz = 4;
+                        if(head.byteperblock && head.channels) {
+                            head.factdata = ((head.byteperblock - (7 * head.channels)) * 8) / head.bitspersample;
+                            head.factdata = (dwLength / head.byteperblock ) * head.factdata;
+                            head.factdata /= head.channels;
+                        } else
+                            head.factdata = 0;
+                        // data
+                        memcpy(&head.blockid, "data", 4);
+                        head.datasize = dwLength;
+                        memcpy(p, &head, sizeof(head));
+                        p+=sizeof(head);  // WAV Header
+                    } else {
+                        // Write simple PCM WAV Header
+                        WAVHEADER_SIMPLE head;
+                        memcpy(&head.sign, "RIFF", 4);
+                        head.filesize = dwLength + 44 - 8;
+                        memcpy(&head.format, "WAVE", 4);
+                        // fmt
+                        memcpy(&head.formatid, "fmt ", 4);
+                        head.blocksize = 0x10;
+                        head.audioformat = 1;
+                        head.channels = miniFmt->nChannels;
+                        head.rate = miniFmt->nSamplesPerSec;
+                        head.bytepersec = miniFmt->AvgBytesPerSec();
+                        head.byteperblock = miniFmt->BlockAlign();
+                        head.bitspersample = miniFmt->BitsPerSample();
+                        // data
+                        memcpy(&head.blockid, "data", 4);
+                        head.datasize = dwLength;
+                        memcpy(p, &head, sizeof(head));
+                        p+=sizeof(head);  // WAV Header
+                    }
                 }
-            }
-            if(fread(p, 1, dwLength, fin)!=dwLength) {
-                printf("ERROR: reading wav data!\n");
-                return -1;
+                if(fread(p, 1, dwLength, fin)!=dwLength) {
+                    printf("ERROR: reading wav data!\n");
+                    return -1;
+                }
             }
             int newLength, newDuration, newrate, newsamples, newBlockAlign, newchannels;
             void* buffout = NULL;
             if (convert) {
-                // find the new rate
-                newchannels = mono?1:miniFmt->nChannels;
-                uint32_t nsamples = Duration * newchannels;
-                int nblocks = dwLength / miniFmt->BlockAlign();
-                nblocks = (uint64_t)nblocks * rate / miniFmt->nSamplesPerSec;
-                newLength = nblocks * miniFmt->BlockAlign();
-                if(adpcm_in != adpcm_out)   // converting adpcm -> PCM : size * 4!
-                    newLength *= 4;
-                newDuration = (uint64_t)Duration * rate / miniFmt->nSamplesPerSec;
-                newrate = (uint64_t)newDuration * miniFmt->nSamplesPerSec / Duration;
-                newsamples = newDuration * newchannels;
-                newBlockAlign = miniFmt->wBlockAlign;
-                // Using Mem Buffer as input seems to have some nasty side effects in the long run... So using an actual file instead for now.
-                //sox_format_t * format_in = sox_open_mem_read(buffin, dwLength + (adpcm_in?sizeof(WAVHEADER_ADPCM):sizeof(WAVHEADER_SIMPLE)), NULL, NULL, "WAV");
-                #define TMPWAV "/tmp/rewxb_tmp.wav"
-                {
-                    FILE *tmp = fopen(TMPWAV, "wb");
-                    fwrite(buffin, 1, dwLength + (adpcm_in?sizeof(WAVHEADER_ADPCM):sizeof(WAVHEADER_SIMPLE)), tmp);
-                    fclose(tmp);
-                }
-                sox_format_t * format_in = sox_open_read(TMPWAV, NULL, NULL, "WAV");
-                if(!format_in) {
-                    printf("ERROR: SOX cannot create read format\n");
-                    return -3;
-                }
-                // copy in to out format
-                sox_signalinfo_t signal_out = {};
-                sox_encodinginfo_t encoding_out;
-                signal_out.channels = newchannels;
-                signal_out.rate = newrate;
-                signal_out.length = newLength*4; // some margin? Cannot use SOX_UNKNOWN_LEN here, maybe because format_in is a mem buffer and so non-seekable?
-                signal_out.precision = format_in->signal.precision;
-                memcpy(&encoding_out, &format_in->encoding, sizeof(encoding_out));
-                if(adpcm_in != adpcm_out) {   // converting adpcm -> PCM
-                    encoding_out.encoding = SOX_ENCODING_SIGN2;
-                    encoding_out.bits_per_sample = 16;
-                    signal_out.precision = 16;
-                }
-                sox_format_t * format_out = NULL;
-                size_t buffer_size;
-                format_out = sox_open_memstream_write((char**)&buffout, &buffer_size, &signal_out, &encoding_out, "WAV", NULL);
-                if(!format_out) {
-                    printf("ERROR: SOX cannot create write format\n");
-                    return -3;
-                }
+                if(silence) {
+                    newchannels = mono?1:miniFmt->nChannels;
+                    newrate = rate;
+                    newDuration = rate;
+                    newLength = newDuration * (adpcm_out?4:(bits8?8:16)) * newchannels / 8;
+                    newBlockAlign = (adpcm_out)?miniFmt->wBlockAlign:2;
+                    newsamples = newDuration * newchannels;
+                    buffout = malloc(newLength);
+                    memset(buffout, 0, newLength); // 0 should be silence, even in msadpcm
+                    p = (char*)buffout;
+                } else {
+                    // find the new rate
+                    newchannels = mono?1:miniFmt->nChannels;
+                    uint32_t nsamples = Duration * newchannels;
+                    int nblocks = dwLength / miniFmt->BlockAlign();
+                    nblocks = (uint64_t)nblocks * rate / miniFmt->nSamplesPerSec;
+                    newLength = nblocks * miniFmt->BlockAlign();
+                    if(adpcm_in != adpcm_out)   // converting adpcm -> PCM : size * 4!
+                        newLength *= 4;
+                    if(bits8)
+                        newLength>>=1;
+                    newDuration = (uint64_t)Duration * rate / miniFmt->nSamplesPerSec;
+                    newrate = (uint64_t)newDuration * miniFmt->nSamplesPerSec / Duration;
+                    newsamples = newDuration * newchannels;
+                    newBlockAlign = miniFmt->wBlockAlign;
+                    // Using Mem Buffer as input seems to have some nasty side effects in the long run... So using an actual file instead for now.
+                    //sox_format_t * format_in = sox_open_mem_read(buffin, dwLength + (adpcm_in?sizeof(WAVHEADER_ADPCM):sizeof(WAVHEADER_SIMPLE)), NULL, NULL, "WAV");
+                    #define TMPWAV "/tmp/rewxb_tmp.wav"
+                    {
+                        FILE *tmp = fopen(TMPWAV, "wb");
+                        fwrite(buffin, 1, dwLength + (adpcm_in?sizeof(WAVHEADER_ADPCM):sizeof(WAVHEADER_SIMPLE)), tmp);
+                        fclose(tmp);
+                    }
+                    sox_format_t * format_in = sox_open_read(TMPWAV, NULL, NULL, "WAV");
+                    if(!format_in) {
+                        printf("ERROR: SOX cannot create read format\n");
+                        return -3;
+                    }
+                    // copy in to out format
+                    sox_signalinfo_t signal_out = {};
+                    sox_encodinginfo_t encoding_out;
+                    signal_out.channels = newchannels;
+                    signal_out.rate = newrate;
+                    signal_out.length = newLength*4; // some margin? Cannot use SOX_UNKNOWN_LEN here, maybe because format_in is a mem buffer and so non-seekable?
+                    signal_out.precision = format_in->signal.precision;
+                    memcpy(&encoding_out, &format_in->encoding, sizeof(encoding_out));
+                    if(adpcm_in != adpcm_out || bits8) {   // converting adpcm -> PCM
+                        encoding_out.encoding = bits8?SOX_ENCODING_UNSIGNED:SOX_ENCODING_SIGN2;
+                        encoding_out.bits_per_sample = bits8?8:16;
+                        signal_out.precision = bits8?8:16;
+                    }
+                    sox_format_t * format_out = NULL;
+                    size_t buffer_size;
+                    format_out = sox_open_memstream_write((char**)&buffout, &buffer_size, &signal_out, &encoding_out, "WAV", NULL);
+                    if(!format_out) {
+                        printf("ERROR: SOX cannot create write format\n");
+                        return -3;
+                    }
 
-                sox_signalinfo_t interm_signal = format_in->signal;
-                sox_effects_chain_t *chain = sox_create_effects_chain(&format_in->encoding, &format_out->encoding);
-                char * args[10];
-                sox_effect_t *e = sox_create_effect(sox_find_effect("input"));
-                args[0] = (char *)format_in;
-                if(sox_effect_options(e, 1, args) != SOX_SUCCESS) {
-                    printf("ERROR: SOX cannot validate input effect\n");
-                    return -3;
-                }
-                if(sox_add_effect(chain, e, &interm_signal, &format_in->signal) != SOX_SUCCESS) {
-                    printf("ERROR: SOX cannot add input effect\n");
-                    return -3;
-                }
-                free(e);
-                e = sox_create_effect(sox_find_effect("rate"));
-                if(sox_effect_options(e, 0, NULL) != SOX_SUCCESS) {
-                    printf("ERROR: SOX cannot validate rate effect\n");
-                    return -3;
-                }
-                if(sox_add_effect(chain, e, &interm_signal, &format_out->signal) != SOX_SUCCESS) {
-                    printf("ERROR: SOX cannot add rate effect\n");
-                    return -3;
-                }
-                free(e);
-                if(format_in->signal.channels != format_out->signal.channels) {
-                    e = sox_create_effect(sox_find_effect("channels"));
+                    sox_signalinfo_t interm_signal = format_in->signal;
+                    sox_effects_chain_t *chain = sox_create_effects_chain(&format_in->encoding, &format_out->encoding);
+                    char * args[10];
+                    sox_effect_t *e = sox_create_effect(sox_find_effect("input"));
+                    args[0] = (char *)format_in;
+                    if(sox_effect_options(e, 1, args) != SOX_SUCCESS) {
+                        printf("ERROR: SOX cannot validate input effect\n");
+                        return -3;
+                    }
+                    if(sox_add_effect(chain, e, &interm_signal, &format_in->signal) != SOX_SUCCESS) {
+                        printf("ERROR: SOX cannot add input effect\n");
+                        return -3;
+                    }
+                    free(e);
+                    e = sox_create_effect(sox_find_effect("rate"));
                     if(sox_effect_options(e, 0, NULL) != SOX_SUCCESS) {
                         printf("ERROR: SOX cannot validate rate effect\n");
                         return -3;
@@ -777,67 +797,79 @@ int main(int argc, const char **argv) {
                         return -3;
                     }
                     free(e);
-                }
-                e = sox_create_effect(sox_find_effect("output"));
-                args[0] = (char *)format_out;
-                if(sox_effect_options(e, 1, args) != SOX_SUCCESS) {
-                    printf("ERROR: SOX cannot validate out effect\n");
-                    return -3;
-                }
-                if(sox_add_effect(chain, e, &interm_signal, &format_out->signal) != SOX_SUCCESS) {
-                    printf("ERROR: SOX cannot add out effect\n");
-                    return -3;
-                }
-                free(e);
-                // convert !
-                if(verbose)
-                    printf("\tConvert %u/%u:%dHz -> %u/%u:%dHz\n", dwLength, Duration, miniFmt->nSamplesPerSec, newLength, newDuration, newrate);
+                    if(format_in->signal.channels != format_out->signal.channels) {
+                        e = sox_create_effect(sox_find_effect("channels"));
+                        if(sox_effect_options(e, 0, NULL) != SOX_SUCCESS) {
+                            printf("ERROR: SOX cannot validate rate effect\n");
+                            return -3;
+                        }
+                        if(sox_add_effect(chain, e, &interm_signal, &format_out->signal) != SOX_SUCCESS) {
+                            printf("ERROR: SOX cannot add rate effect\n");
+                            return -3;
+                        }
+                        free(e);
+                    }
+                    e = sox_create_effect(sox_find_effect("output"));
+                    args[0] = (char *)format_out;
+                    if(sox_effect_options(e, 1, args) != SOX_SUCCESS) {
+                        printf("ERROR: SOX cannot validate out effect\n");
+                        return -3;
+                    }
+                    if(sox_add_effect(chain, e, &interm_signal, &format_out->signal) != SOX_SUCCESS) {
+                        printf("ERROR: SOX cannot add out effect\n");
+                        return -3;
+                    }
+                    free(e);
+                    // convert !
+                    if(verbose)
+                        printf("\tConvert %u/%u:%dHz -> %u/%u:%dHz\n", dwLength, Duration, miniFmt->nSamplesPerSec, newLength, newDuration, newrate);
 
-                int err = sox_flow_effects(chain, NULL, NULL);
-                if(err!=SOX_SUCCESS) {
-                    printf("ERROR: SOX: %s\n", sox_strerror(err));
-                }
+                    int err = sox_flow_effects(chain, NULL, NULL);
+                    if(err!=SOX_SUCCESS) {
+                        printf("ERROR: SOX: %s\n", sox_strerror(err));
+                    }
 
-                sox_delete_effects_chain(chain);
-                sox_close(format_out);
-                sox_close(format_in);
-                // read back the file (only for adpcm, for PCM it's already in the memory buffer as RAW)
-                if(adpcm_out) {
-                    WAVHEADER_ADPCM *head = (WAVHEADER_ADPCM*)buffout;
-                    // check the header is as expected
-                    if(memcmp(&head->sign, "RIFF", 4)) {
-                        printf("ERROR: Converted WAV is not a WAV file???\n");
-                        return -3;
+                    sox_delete_effects_chain(chain);
+                    sox_close(format_out);
+                    sox_close(format_in);
+                    // read back the file (only for adpcm, for PCM it's already in the memory buffer as RAW)
+                    if(adpcm_out) {
+                        WAVHEADER_ADPCM *head = (WAVHEADER_ADPCM*)buffout;
+                        // check the header is as expected
+                        if(memcmp(&head->sign, "RIFF", 4)) {
+                            printf("ERROR: Converted WAV is not a WAV file???\n");
+                            return -3;
+                        }
+                        if(head->extrassz!=32 || memcmp(&head->factid, "fact", 4) || head->factsz!=4) {
+                            printf("ERROR: Converted WAV doesn't have the expected header...\n");
+                            return -3;
+                        }
+                        newLength = buffer_size - sizeof(WAVHEADER_ADPCM);//head->datasize;
+                        newrate = head->rate;
+                        newchannels = head->channels;
+                        newBlockAlign = head->byteperblock/head->channels - MINIWAVEFORMAT::ADPCM_BLOCKALIGN_CONVERSION_OFFSET;
+                        newDuration = newLength * 8 / (newchannels*4);
+                        p = (char*)buffout+sizeof(WAVHEADER_ADPCM);
+                    } else {
+                        WAVHEADER_SIMPLE *head = (WAVHEADER_SIMPLE*)buffout;
+                        // check the header is as expected
+                        if(memcmp(&head->sign, "RIFF", 4)) {
+                            printf("ERROR: Converted WAV is not a WAV file???\n");
+                            return -3;
+                        }
+                        if(head->blocksize!=16) {
+                            printf("ERROR: Converted WAV doesn't have the expected header...(0x%x!=0x10)\n", head->blocksize);
+                            return -3;
+                        }
+                        newLength = buffer_size - sizeof(WAVHEADER_SIMPLE);//head->datasize;
+                        newrate = head->rate;
+                        newchannels = head->channels;
+                        newBlockAlign = head->byteperblock;
+                        newDuration = newLength * 8 / (newchannels*head->bitspersample); 
+                        p = (char*)buffout+sizeof(WAVHEADER_SIMPLE);
                     }
-                    if(head->extrassz!=32 || memcmp(&head->factid, "fact", 4) || head->factsz!=4) {
-                        printf("ERROR: Converted WAV doesn't have the expected header...\n");
-                        return -3;
-                    }
-                    newLength = buffer_size - sizeof(WAVHEADER_ADPCM);//head->datasize;
-                    newrate = head->rate;
-                    newchannels = head->channels;
-                    newBlockAlign = head->byteperblock/head->channels - MINIWAVEFORMAT::ADPCM_BLOCKALIGN_CONVERSION_OFFSET;
-                    newDuration = newLength * 8 / (newchannels*4);
-                    p = (char*)buffout+sizeof(WAVHEADER_ADPCM);
-                } else {
-                    WAVHEADER_SIMPLE *head = (WAVHEADER_SIMPLE*)buffout;
-                    // check the header is as expected
-                    if(memcmp(&head->sign, "RIFF", 4)) {
-                        printf("ERROR: Converted WAV is not a WAV file???\n");
-                        return -3;
-                    }
-                    if(head->blocksize!=16) {
-                        printf("ERROR: Converted WAV doesn't have the expected header...(0x%x!=0x10)\n", head->blocksize);
-                        return -3;
-                    }
-                    newLength = buffer_size - sizeof(WAVHEADER_SIMPLE);//head->datasize;
-                    newrate = head->rate;
-                    newchannels = head->channels;
-                    newBlockAlign = head->byteperblock;
-                    newDuration = newLength * 8 / (newchannels*16); 
-                    p = (char*)buffout+sizeof(WAVHEADER_SIMPLE);
+                    remove(TMPWAV);
                 }
-                remove(TMPWAV);
             } else {
                 newLength = dwLength;
                 buffout = buffin;
@@ -863,18 +895,23 @@ int main(int argc, const char **argv) {
                 newminiFmt->nSamplesPerSec = newrate;
                 newminiFmt->wBlockAlign = newBlockAlign;
                 newminiFmt->nChannels = newchannels;
-                if(adpcm_in != adpcm_out) {
+                if(adpcm_in != adpcm_out || bits8) {
                     newminiFmt->wFormatTag=MINIWAVEFORMAT::TAG_PCM;
-                    newminiFmt->wBitsPerSample=1; // 16bits
+                    newminiFmt->wBitsPerSample=1-bits8; // 16bits
                 }
                 if(verbose)
-                    printf("%u->%u/%dx%dHz %s\n", newentry.PlayRegion.dwOffset, newentry.PlayRegion.dwLength, newminiFmt->nChannels, newminiFmt->nSamplesPerSec, adpcm_out?"MS_ADPCM":"PCM");
+                    printf("%u->%u/%dx%dHz %s%s\n", newentry.PlayRegion.dwOffset, newentry.PlayRegion.dwLength, newminiFmt->nChannels, newminiFmt->nSamplesPerSec, adpcm_out?"MS_ADPCM":"PCM", bits8?" 8bits":"");
                 if ( newentry.LoopRegion.dwTotalSamples > 0 )
                 {
-                    newentry.LoopRegion.dwStartSample = ((uint64_t)(newentry.LoopRegion.dwStartSample/32) * newrate / oldrate)*32;
-                    newentry.LoopRegion.dwTotalSamples = ((uint64_t)(newentry.LoopRegion.dwTotalSamples/32) * newrate / oldrate)*32;
-                    if(newentry.LoopRegion.dwTotalSamples>newDuration)
-                        newentry.LoopRegion.dwTotalSamples=newDuration;
+                    if(silence) {
+                        newentry.LoopRegion.dwStartSample = 0;
+                        newentry.LoopRegion.dwTotalSamples = newDuration;
+                    } else {
+                        newentry.LoopRegion.dwStartSample = ((uint64_t)(newentry.LoopRegion.dwStartSample/32) * newrate / oldrate)*32;
+                        newentry.LoopRegion.dwTotalSamples = ((uint64_t)(newentry.LoopRegion.dwTotalSamples/32) * newrate / oldrate)*32;
+                        if(newentry.LoopRegion.dwTotalSamples>newDuration)
+                            newentry.LoopRegion.dwTotalSamples=newDuration;
+                    }
                 }
             } else {
                 if ( bank.dwFlags & WAVEBANK_FLAGS_COMPACT ) {
