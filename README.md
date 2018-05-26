@@ -32,7 +32,7 @@ You need at least 3 argument: infile.wxb outfile.wxb rate
 you can also use `-f` to force the MS ADPCM sound to be converted to PCM 16bits. PCM are 4 times bigger then ADPCM, but the loading time of thegame should be shorter, and conversion time too (but resulting wxb file will be bigger)
 An example could be:
 
-`./rewxb Content/XACT/Wave\ Bank.wxb new.wxb 11025 -f`
+`./rexwb Content/XACT/Wave\ Bank.wxb new.wxb 11025 -f`
 
 Another optionnal parameter is `-p`, in that case no verbose message is shown, only a percentage number (to be used with a zenity progress bar).
 
