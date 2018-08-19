@@ -92,7 +92,7 @@ int main(int argc, const char **argv) {
             "Use -f to force MS ADPCM to simple PCM\n"
             "Use -m to force mono on all multi-channels ADPCM or PCM sounds\n"
             "Use -8 to force PCM sounds and 8 bits (don't use)\n"
-            "Use -s XX to replace sounds longer then XX sec to 1 sec silence"
+            "Use -s XX to replace sounds longer then XX sec to 1 sec silence\n"
             "Use -p to display percentage (no verbose output, to be used with a zenity progress bar)\n"
             , argv[0]);
         return 1;
