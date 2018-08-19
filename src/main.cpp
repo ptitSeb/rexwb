@@ -81,7 +81,7 @@ int main(int argc, const char **argv) {
                 {bits8=1; force=1;}
             else if(!strcmp(argv[i], "-s") && argc>=i+1)
                 {++i; sscanf(argv[i],"%d", &silent);}
-            else rate = 0;
+            else {rate = 0; printf("Unknown option \"%s\", aborting\n", argv[i]);}
         }
     }
     if(!rate) {
